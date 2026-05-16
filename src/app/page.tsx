@@ -1,101 +1,145 @@
-import Image from "next/image";
+'use client';
+
+import { useState, useRef } from 'react';
+import SearchForm from '@/components/SearchForm';
+import LiveFeed from '@/components/LiveFeed';
+import RepoCard from '@/components/RepoCard';
+import type { ScoredRepo, SearchFilters } from '@/lib/types';
+
+const DEFAULT_FILTERS: SearchFilters = {
+  language: '',
+  experience: 'intermediate',
+  platform: '',
+  scale: '',
+  purpose: '',
+  projectContext: '',
+  query: '',
+};
+
+// Simulated steps shown while the request is in-flight
+const LOADING_STEPS: { delay: number; msg: string }[] = [
+  { delay: 0,     msg: 'Parsing your search intent...' },
+  { delay: 600,   msg: 'Building GitHub search strategy...' },
+  { delay: 1400,  msg: 'Querying GitHub API...' },
+  { delay: 4000,  msg: 'Fetching READMEs and owner profiles for top candidates...' },
+  { delay: 8000,  msg: 'Sending repository data to Claude for deep analysis...' },
+  { delay: 14000, msg: 'Claude is scoring relevance, code quality, and human authorship...' },
+  { delay: 22000, msg: 'Almost done — ranking final results by composite score...' },
+];
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const [filters, setFilters] = useState<SearchFilters>(DEFAULT_FILTERS);
+  const [loading, setLoading] = useState(false);
+  const [steps, setSteps] = useState<string[]>([]);
+  const [results, setResults] = useState<ScoredRepo[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  function clearTimers() {
+    timersRef.current.forEach(clearTimeout);
+    timersRef.current = [];
+  }
+
+  async function handleSearch() {
+    clearTimers();
+    setLoading(true);
+    setError(null);
+    setResults([]);
+    setDone(false);
+    setSteps([]);
+
+    // Animate fake steps while waiting for the API response
+    const timers = LOADING_STEPS.map(({ delay, msg }) =>
+      setTimeout(() => setSteps((prev) => [...prev, msg]), delay)
+    );
+    timersRef.current = timers;
+
+    try {
+      const res = await fetch('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filters }),
+      });
+
+      const data = await res.json();
+
+      // Replace simulated steps with the real ones from the server
+      clearTimers();
+
+      if (!res.ok) {
+        setError(data.error ?? 'Something went wrong.');
+        setDone(true);
+      } else {
+        setSteps(data.steps ?? []);
+        setResults(data.results ?? []);
+        setDone(true);
+      }
+    } catch (err) {
+      clearTimers();
+      setError(err instanceof Error ? err.message : 'Network error. Please try again.');
+      setDone(true);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="relative max-w-4xl mx-auto px-4 py-12 flex flex-col gap-10">
+
+        {/* Header */}
+        <header className="text-center space-y-3">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-950 border border-indigo-800 text-indigo-400 text-xs font-medium mb-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+            Powered by GitHub API + Claude (your Pro plan)
+          </div>
+          <h1 className="text-5xl font-bold tracking-tight text-white">
+            Repo<span className="text-indigo-400">Radar</span>
+          </h1>
+          <p className="text-zinc-400 text-base max-w-xl mx-auto leading-relaxed">
+            Find real, human-written GitHub repositories that will actually teach you something.
+            <br />
+            <span className="text-zinc-600 text-sm">Claude reads the README, owner bio, and code quality — not just star counts.</span>
+          </p>
+        </header>
+
+        {/* Search form */}
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 md:p-8">
+          <SearchForm
+            filters={filters}
+            loading={loading}
+            onChange={setFilters}
+            onSubmit={handleSearch}
+          />
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+
+        {/* Live algorithm feed */}
+        {(steps.length > 0 || (loading && steps.length === 0)) && (
+          <LiveFeed steps={steps} done={done} error={error} />
+        )}
+
+        {/* Results */}
+        {results.length > 0 && (
+          <section className="flex flex-col gap-5">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-widest">
+                Top {results.length} Repositories
+              </h2>
+              <span className="text-xs text-zinc-600">ranked by Claude composite score</span>
+            </div>
+            {results.map((repo, i) => (
+              <RepoCard key={repo.url} repo={repo} rank={i + 1} />
+            ))}
+          </section>
+        )}
+
+        {done && results.length === 0 && !error && (
+          <div className="text-center py-12 text-zinc-500 text-sm">
+            No repositories found. Try broader keywords or a different language.
+          </div>
+        )}
+      </div>
     </div>
   );
 }
