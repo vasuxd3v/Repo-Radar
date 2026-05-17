@@ -4,55 +4,38 @@ import type { ScoredRepo, SearchFilters } from './types';
 
 export interface SearchPlan {
   hardRequirements: string[];
-  searchQueries: string[];
-  triageKeywords: string[];
+  searchQueries:    string[];
+  triageKeywords:   string[];
 }
 
-const BOB_BIN = process.env.BOB_BIN || 'bob';
+const BOB_BIN       = process.env.BOB_BIN || 'bob';
 const BOB_TIMEOUT_MS = 150_000;
 
-// IBM Bob Shell CLI — the documented programmatic interface for IBM Bob.
-// Ref: https://bob.ibm.com/docs/shell/getting-started/start-bobshell-non-interactive
-// Usage: set BOBSHELL_API_KEY, then pipe prompt via stdin to `bob --auth-method api-key`
 function callBobShell(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const apiKey = process.env.BOBSHELL_API_KEY || process.env.IBM_BOB_API_KEY;
-    const env = { ...process.env, BOBSHELL_API_KEY: apiKey ?? '' };
+    const env    = { ...process.env, BOBSHELL_API_KEY: apiKey ?? '' };
+    const child  = spawn(BOB_BIN, ['--auth-method', 'api-key', '--accept-license'], { env });
 
-    const child = spawn(BOB_BIN, ['--auth-method', 'api-key', '--accept-license'], { env });
-
-    let stdout = '';
-    let stderr = '';
-
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error('Bob Shell timed out after 150s'));
-    }, BOB_TIMEOUT_MS);
+    let stdout = '', stderr = '';
+    const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('Bob timed out')); }, BOB_TIMEOUT_MS);
 
     child.stdout.on('data', (d) => { stdout += d.toString(); });
     child.stderr.on('data', (d) => { stderr += d.toString(); });
-
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code === 0 && stdout.trim()) resolve(stdout.trim());
-      else reject(new Error(`Bob Shell exited ${code}: ${stderr.trim() || 'no output'}`));
+      else reject(new Error(`Bob exited ${code}: ${stderr.trim() || 'no output'}`));
     });
-
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(new Error(`Cannot start Bob Shell (is it installed?): ${err.message}`));
-    });
-
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
     child.stdin.write(prompt);
     child.stdin.end();
   });
 }
 
-// callBob is the unified IBM Bob caller. It pipes the combined prompt to Bob Shell
-// and returns a response shaped like the Anthropic messages API so all callers are unchanged.
 export async function callBob(
   messages: Array<{ role: string; content: string }>,
-  system: string,
+  system:   string,
   _maxTokens = 512
 ) {
   const fullPrompt = `${system}\n\n${messages.map((m) => m.content).join('\n\n')}`;

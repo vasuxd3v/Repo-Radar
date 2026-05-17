@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { gunzipSync } from 'zlib';
 import { Octokit } from '@octokit/rest';
 import { callClaude } from './claude';
 import type { BobExplanation } from './types';
@@ -9,9 +9,6 @@ const README_NAMES = new Set(['readme.md', 'readme', 'readme.txt', 'readme.rst']
 const CODE_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'cs', 'rb', 'swift', 'kt']);
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'vendor', '__pycache__', 'coverage', '.cache']);
 const SKIP_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'woff', 'woff2', 'ttf', 'eot', 'lock', 'sum', 'mod', 'pdf', 'zip']);
-
-const BOB_BIN = process.env.BOB_BIN || 'bob';
-const BOB_TIMEOUT_MS = 120_000;
 
 function pickFiles(paths: string[]): string[] {
   const selected: string[] = [];
