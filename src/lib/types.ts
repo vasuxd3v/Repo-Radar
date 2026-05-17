@@ -21,3 +21,12 @@ export interface SearchFilters {
   projectContext: string;
   query: string;
 }
+
+export interface BobExplanation {
+  overview: string;
+  architecture: string;
+  keyPatterns: Array<{ name: string; explanation: string }>;
+  whereToStart: string;
+  learningValue: string;
+  bobNote: string;
+}

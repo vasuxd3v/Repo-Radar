@@ -1,26 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { searchRepos } from '@/lib/github';
-import { extractSearchPlan as extractPlanBob } from '@/lib/bob';
-import { extractSearchPlan as extractPlanClaude, analyzeRepos } from '@/lib/claude';
+import { extractSearchPlan as extractPlanBob, analyzeRepos } from '@/lib/bob';
+import { extractSearchPlan as extractPlanClaude } from '@/lib/claude';
 import type { SearchFilters } from '@/lib/types';
 import type { SearchPlan } from '@/lib/bob';
 
 const MIN_STARS: Record<string, number> = {
-  beginner:     5,
-  intermediate: 30,
-  advanced:     100,
+  beginner:     1,   // very low floor — niche beginner repos may have few stars
+  intermediate: 10,
+  advanced:     50,
 };
 
 const STAR_CEILING_BY_SCALE: Record<string, number> = {
-  'single-file': 1000,
-  'small':       5000,
-  'medium':      30000,
+  'single-file': 2000,
+  'small':       10000,
+  'medium':      50000,
   'production':  Infinity,
   '':            Infinity,
 };
 const STAR_CEILING_BY_EXP: Record<string, number> = {
-  beginner:     3000,
-  intermediate: 20000,
+  beginner:     10000, // raised — beginner repos can still be popular
+  intermediate: Infinity,
   advanced:     Infinity,
 };
 
@@ -54,9 +54,9 @@ export async function POST(req: NextRequest) {
     let plan: SearchPlan;
     try {
       plan = await extractPlanBob(filters);
-      step(`Using IBM BOB for search planning.`);
+      step('Search plan ready.');
     } catch {
-      step('Falling back to Claude for search planning...');
+      step('Retrying search plan with backup engine...');
       plan = await extractPlanClaude(filters);
     }
     step(`Requirements: ${plan.hardRequirements.join(' · ') || 'inferred from context'}`);
@@ -65,9 +65,9 @@ export async function POST(req: NextRequest) {
     // ── Step 2: Run all search queries in parallel ──
     const baseParams = {
       language: filters.language || undefined,
-      minStars: MIN_STARS[filters.experience] ?? 30,
+      minStars: MIN_STARS[filters.experience] ?? 10,
       sort:     'best-match' as const,
-      perPage:  20,
+      perPage:  30,  // fetch more per query so the pool is larger
     };
 
     const allResults = await Promise.all(
@@ -86,14 +86,16 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Step 3b: Triage — reject repos that don't mention core domain keywords ──
-    if (plan.triageKeywords.length > 0 && repos.length > 4) {
+    // ── Step 3b: Triage — only filter when we have a large pool ──
+    // Skip triage when results are already scarce to avoid cutting the candidate pool too aggressively.
+    if (plan.triageKeywords.length > 0 && repos.length > 15) {
       const kws = plan.triageKeywords.map((k) => k.toLowerCase());
       const triaged = repos.filter((repo) => {
         const haystack = [repo.name, repo.description ?? '', ...repo.topics].join(' ').toLowerCase();
         return kws.some((k) => haystack.includes(k));
       });
-      if (triaged.length >= 3) {
+      // Only apply triage if we'd still have at least 10 repos after filtering
+      if (triaged.length >= 10) {
         const removed = repos.length - triaged.length;
         if (removed > 0) step(`Triage: removed ${removed} off-topic repos.`);
         repos = triaged;

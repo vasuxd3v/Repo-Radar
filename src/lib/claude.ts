@@ -5,7 +5,7 @@ import type { SearchPlan } from './bob';
 export type { ScoredRepo, SearchFilters } from './types';
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || `${process.env.HOME}/.local/bin/claude`;
-const CLAUDE_TIMEOUT_MS = 150_000;
+const CLAUDE_TIMEOUT_MS = 210_000;
 
 export async function callClaude(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -42,9 +42,11 @@ export async function callClaude(prompt: string): Promise<string> {
   });
 }
 
-// ── step 1+2: search planning ───────────────────────────────────────────────
+// ── step 1+2: search planning ────────────────────────────────────────────────
 
 export async function extractSearchPlan(filters: SearchFilters): Promise<SearchPlan> {
+  const isBeginner = filters.experience === 'beginner';
+
   const context = [
     filters.query          && `What I need: ${filters.query}`,
     filters.projectContext && `Project: ${filters.projectContext}`,
@@ -55,9 +57,22 @@ export async function extractSearchPlan(filters: SearchFilters): Promise<SearchP
     `Experience: ${filters.experience}`,
   ].filter(Boolean).join('\n');
 
+  const experienceGuidance = isBeginner
+    ? `IMPORTANT — experience is BEGINNER:
+- At least one query must target tutorials, examples, or educational repos (e.g. append "tutorial", "example", "beginner", "demo", or "learning" to a query)
+- Prefer repos that teach concepts over production tools
+- Avoid queries that would return advanced/kernel/production-grade tooling`
+    : filters.experience === 'advanced'
+    ? `IMPORTANT — experience is ADVANCED:
+- Target production-quality, well-architected implementations
+- Prefer repos showing real engineering decisions over toy examples`
+    : '';
+
   const prompt = `You are a GitHub search expert. Analyze this developer request and produce a structured search plan.
 
 ${context}
+
+${experienceGuidance}
 
 Return ONLY valid JSON (no markdown, no fences):
 {
@@ -67,13 +82,14 @@ Return ONLY valid JSON (no markdown, no fences):
 }
 
 Rules for searchQueries:
-- 2-3 queries each covering a DIFFERENT search angle, 2-4 words each
+- Exactly 3 queries, each covering a DIFFERENT angle (topic angle / beginner angle / alternative naming angle)
 - Map implied concepts: "25 min focus + 5 min break" → "pomodoro", "track expenses" → "budget tracker"
 - Use technical terms that appear in GitHub repo names/descriptions
-- No language names, no generic words like "simple", "project", "program", "tool"
+- No language names in queries (language is filtered separately)
+- No generic words: "simple", "project", "program", "tool", "app", "code"
 
-Example for a Python pomodoro timer with GUI and CSV logging:
-{"hardRequirements":["Pomodoro 25/5 cycles","tkinter GUI","CSV session logging","stats display"],"searchQueries":["pomodoro timer tkinter","pomodoro gui session csv","pomodoro desktop tracker"],"triageKeywords":["pomodoro","timer","focus"]}`;
+Example for a Python pomodoro timer with GUI and CSV logging (beginner):
+{"hardRequirements":["Pomodoro 25/5 cycles","tkinter GUI","CSV session logging"],"searchQueries":["pomodoro timer tkinter","pomodoro gui session csv","pomodoro tutorial beginner"],"triageKeywords":["pomodoro","timer","focus"]}`;
 
   try {
     const text = await callClaude(prompt);
@@ -82,20 +98,20 @@ Example for a Python pomodoro timer with GUI and CSV logging:
       hardRequirements: Array.isArray(parsed.hardRequirements) ? parsed.hardRequirements : [],
       searchQueries: Array.isArray(parsed.searchQueries) && parsed.searchQueries.length > 0
         ? parsed.searchQueries.slice(0, 3)
-        : [filters.query || filters.language || 'tool'],
+        : [filters.query || filters.language || 'tutorial'],
       triageKeywords: Array.isArray(parsed.triageKeywords) ? parsed.triageKeywords : [],
     };
   } catch (err) {
     console.error('[RepoRadar] extractSearchPlan failed:', err);
     return {
       hardRequirements: [],
-      searchQueries: [filters.query || filters.projectContext || filters.language || 'tool'],
+      searchQueries: [filters.query || filters.projectContext || filters.language || 'tutorial'],
       triageKeywords: [],
     };
   }
 }
 
-// ── step 4+5: scoring ───────────────────────────────────────────────────────
+// ── step 4+5: scoring ────────────────────────────────────────────────────────
 
 export async function analyzeRepos(
   repos: RepoResult[],
@@ -105,26 +121,24 @@ export async function analyzeRepos(
 ): Promise<{ results: ScoredRepo[] }> {
   const { query, projectContext, experience, language } = filters;
 
-  const candidates = repos.slice(0, 12);
+  // Analyze up to 15 candidates — enough for a good ranking without blowing the prompt budget
+  const candidates = repos.slice(0, 15);
   onStep(`Reading READMEs for ${candidates.length} repositories...`);
 
   const reposWithReadmes = await Promise.all(
-    candidates.map(async (repo) => {
-      onStep(`  Fetching ${repo.name}...`);
-      return { ...repo, readme: await fetchReadme(repo.name) };
-    })
+    candidates.map(async (repo) => ({ ...repo, readme: await fetchReadme(repo.name) }))
   );
 
-  onStep('All READMEs fetched. Sending to Claude for deep analysis...');
+  onStep('All READMEs fetched. Running deep analysis...');
 
   const { platform, scale, purpose } = filters;
   const userIntent = [
-    query && `Goal: ${query}`,
+    query          && `Goal: ${query}`,
     projectContext && `Project context: ${projectContext}`,
-    language && `Language: ${language}`,
-    platform && `Platform: ${platform}`,
-    scale && `Expected repo size: ${scale}`,
-    purpose && `Repo purpose/type: ${purpose}`,
+    language       && `Language: ${language}`,
+    platform       && `Platform: ${platform}`,
+    scale          && `Expected repo size: ${scale}`,
+    purpose        && `Repo purpose/type: ${purpose}`,
     `Experience level: ${experience}`,
   ].filter(Boolean).join('\n');
 
@@ -135,8 +149,8 @@ Stars: ${r.stars} | Language: ${r.language ?? 'unknown'} | Topics: ${r.topics.jo
 Owner bio: ${r.ownerBio ?? 'n/a'}
 Description: ${r.description ?? 'none'}
 Last updated: ${r.lastUpdated}
-README (first 2000 chars):
-${r.readme?.slice(0, 2000) ?? '(no README)'}
+README (first 1000 chars):
+${r.readme?.slice(0, 1000) ?? '(no README)'}
 ---`
     )
     .join('\n\n');
@@ -145,47 +159,44 @@ ${r.readme?.slice(0, 2000) ?? '(no README)'}
     ? hardRequirements.map((r, i) => `${i + 1}. ${r}`).join('\n')
     : '(infer from user context)';
 
-  const prompt = `You are evaluating GitHub repositories against specific hard requirements.
+  const prompt = `You are evaluating GitHub repositories for a developer with experience level: ${experience}.
 
-Hard requirements the user needs:
+Hard requirements:
 ${requirementsList}
 
 User context:
 ${userIntent}
 
-Score each repository using this requirement-fit-first rubric:
+Score EVERY repository in the list. Do not skip any. Use this rubric:
 
-requirementFit (0-10) — HIGHEST PRIORITY, weight 0.40
-  10 = all requirements already implemented
-  7-9 = most requirements met, trivial gaps
-  4-6 = some requirements met, significant gaps
-  1-3 = wrong domain or fundamentally mismatched
+requirementFit (0-10) — weight 0.40
+  How well does this repo match what the user is asking for?
+  10 = perfect match, 5 = partially useful, 1 = completely wrong domain
 
-effortToAdapt (0-10) — HIGH PRIORITY, weight 0.30
-  10 = clear extension points, trivial to add missing features
-  7-9 = clean code, moderate effort to extend
-  4-6 = significant refactoring needed
-  1-3 = essentially a full rewrite
+effortToAdapt (0-10) — weight 0.30
+  How easy is it for someone at the stated experience level to read and learn from this code?
+  10 = easy to follow for this experience level, 5 = doable with effort, 1 = inaccessible
 
-codeReadability (0-10) — MEDIUM, weight 0.20
+codeReadability (0-10) — weight 0.20
   Clean structure, small surface area, sensible file layout, minimal dependencies
 
-trustSignals (0-10) — LOW-MEDIUM, weight 0.10
+trustSignals (0-10) — weight 0.10
   README quality, usage instructions, recent activity, runnable as-is
 
 Composite = (requirementFit × 0.40) + (effortToAdapt × 0.30) + (codeReadability × 0.20) + (trustSignals × 0.10)
 
-EXCLUDE repos where requirementFit < 3.
-Also write "whyLearnFrom" — is this the best direct match or best base to extend?
+For each repo write:
+- "explanation": 2-3 sentences on how well it matches the requirements and experience level
+- "whyLearnFrom": 1 sentence on what value it provides to this developer
 
-Return ONLY a valid JSON array (no markdown, no fences):
-[{"index":number,"scores":{"requirementFit":number,"effortToAdapt":number,"codeReadability":number,"trustSignals":number,"composite":number},"explanation":"2-3 sentences on requirement fit and gaps","whyLearnFrom":"1 sentence"}]
+Return ONLY a valid JSON array containing ALL repositories (no exclusions, no markdown):
+[{"index":number,"scores":{"requirementFit":number,"effortToAdapt":number,"codeReadability":number,"trustSignals":number,"composite":number},"explanation":"...","whyLearnFrom":"..."}]
 
 Repositories:
 ${repoSummaries}`;
 
   const responseText = await callClaude(prompt);
-  onStep('Claude analysis complete. Ranking by composite score...');
+  onStep('Analysis complete. Ranking by composite score...');
 
   const cleaned = responseText.replace(/```json\n?|\n?```/g, '').trim();
   const scored: Array<{
@@ -205,8 +216,10 @@ ${repoSummaries}`;
     .filter(Boolean)
     .sort((a, b) => b.scores.composite - a.scores.composite);
 
-  const relevant = allScored.filter((r) => r.scores.requirementFit >= 3);
-  const results: ScoredRepo[] = (relevant.length > 0 ? relevant : allScored).slice(0, 8);
+  // Always return top 8. If enough repos score well (>= 4), prefer those.
+  // Otherwise show the best available so the user always gets results.
+  const goodFit  = allScored.filter((r) => r.scores.requirementFit >= 4);
+  const results: ScoredRepo[] = (goodFit.length >= 4 ? goodFit : allScored).slice(0, 8);
 
   onStep(`Done. Returning top ${results.length} repositories.`);
   return { results };

@@ -6,13 +6,15 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "bob:readme": "node scripts/generate-readme-with-bob.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.143",
     "@anthropic-ai/sdk": "^0.96.0",
     "@octokit/rest": "^22.0.1",
     "anthropic": "^0.0.0",
+    "framer-motion": "^12.38.0",
     "next": "14.2.35",
     "react": "^18",
     "react-dom": "^18"

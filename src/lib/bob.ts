@@ -1,4 +1,4 @@
-import { gunzipSync } from 'zlib';
+import { spawn } from 'child_process';
 import { fetchReadme, RepoResult, SearchParams } from './github';
 import type { ScoredRepo, SearchFilters } from './types';
 
@@ -8,67 +8,105 @@ export interface SearchPlan {
   triageKeywords: string[];
 }
 
-const BOB_ENDPOINT = process.env.IBM_BOB_ENDPOINT || 'https://api.bob.ibm.com/v1';
-const BOB_MODEL = process.env.IBM_BOB_MODEL || 'bob-v1';
-const BOB_API_KEY = process.env.IBM_BOB_API_KEY!;
+const BOB_BIN = process.env.BOB_BIN || 'bob';
+const BOB_TIMEOUT_MS = 150_000;
 
-async function callBob(
+// IBM Bob Shell CLI — the documented programmatic interface for IBM Bob.
+// Ref: https://bob.ibm.com/docs/shell/getting-started/start-bobshell-non-interactive
+// Usage: set BOBSHELL_API_KEY, then pipe prompt via stdin to `bob --auth-method api-key`
+function callBobShell(prompt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const apiKey = process.env.BOBSHELL_API_KEY || process.env.IBM_BOB_API_KEY;
+    const env = { ...process.env, BOBSHELL_API_KEY: apiKey ?? '' };
+
+    const child = spawn(BOB_BIN, ['--auth-method', 'api-key', '--accept-license'], { env });
+
+    let stdout = '';
+    let stderr = '';
+
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error('Bob Shell timed out after 150s'));
+    }, BOB_TIMEOUT_MS);
+
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0 && stdout.trim()) resolve(stdout.trim());
+      else reject(new Error(`Bob Shell exited ${code}: ${stderr.trim() || 'no output'}`));
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(new Error(`Cannot start Bob Shell (is it installed?): ${err.message}`));
+    });
+
+    child.stdin.write(prompt);
+    child.stdin.end();
+  });
+}
+
+// callBob is the unified IBM Bob caller. It pipes the combined prompt to Bob Shell
+// and returns a response shaped like the Anthropic messages API so all callers are unchanged.
+export async function callBob(
   messages: Array<{ role: string; content: string }>,
   system: string,
-  maxTokens = 512
+  _maxTokens = 512
 ) {
-  const response = await fetch(`${BOB_ENDPOINT}/messages`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': BOB_API_KEY,
-    },
-    body: JSON.stringify({
-      model: BOB_MODEL,
-      max_tokens: maxTokens,
-      system,
-      messages,
-    }),
-  });
+  const fullPrompt = `${system}\n\n${messages.map((m) => m.content).join('\n\n')}`;
+  const text = await callBobShell(fullPrompt);
+  return { content: [{ type: 'text' as const, text }] };
+}
 
-  if (!response.ok) {
-    const raw = await response.arrayBuffer();
-    let errText: string;
-    try { errText = gunzipSync(Buffer.from(raw)).toString('utf-8'); }
-    catch { errText = Buffer.from(raw).toString('utf-8'); }
-    throw new Error(`Bob API ${response.status}: ${errText}`);
+function extractJSON(raw: string): string {
+  const clean = raw
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/\x1B\][^\x07]*\x07/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(/```json\n?|\n?```/g, '');
+
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < clean.length; i++) {
+    const c = clean[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\' && inString) { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) return clean.slice(start, i + 1);
+    }
   }
 
-  // Bob returns gzip-compressed JSON; fetch in Next.js server context doesn't auto-decompress
-  const buffer = await response.arrayBuffer();
-  let text: string;
-  try {
-    text = gunzipSync(Buffer.from(buffer)).toString('utf-8');
-  } catch {
-    text = Buffer.from(buffer).toString('utf-8');
-  }
-  return JSON.parse(text);
+  const first = clean.indexOf('{');
+  const last = clean.lastIndexOf('}');
+  return first >= 0 && last > first ? clean.slice(first, last + 1) : clean.trim();
 }
 
 // Step 1 + 2: Extract hard requirements and generate multi-angle search queries
 export async function extractSearchPlan(filters: SearchFilters): Promise<SearchPlan> {
   const userContext = [
-    filters.query        && `What I need: ${filters.query}`,
+    filters.query          && `What I need: ${filters.query}`,
     filters.projectContext && `Project: ${filters.projectContext}`,
-    filters.language     && `Language: ${filters.language}`,
-    filters.platform     && `Platform: ${filters.platform}`,
-    filters.scale        && `Scale: ${filters.scale}`,
-    filters.purpose      && `Purpose: ${filters.purpose}`,
+    filters.language       && `Language: ${filters.language}`,
+    filters.platform       && `Platform: ${filters.platform}`,
+    filters.scale          && `Scale: ${filters.scale}`,
+    filters.purpose        && `Purpose: ${filters.purpose}`,
     `Experience level: ${filters.experience}`,
   ].filter(Boolean).join('\n');
 
   const system = `You are a GitHub search expert. Analyze a developer's request and produce a structured search plan.
 
-Step 1 — Extract hard requirements: the specific features the user MUST have.
-Step 2 — Generate 3 GitHub search queries from DIFFERENT angles to maximize result coverage.
-Step 3 — Identify triage keywords: core domain terms that any relevant repo should mention.
-
-Return ONLY valid JSON:
+Return ONLY valid JSON (no markdown, no preamble):
 {
   "hardRequirements": string[],
   "searchQueries": string[],
@@ -89,21 +127,16 @@ Example — for "python pomodoro timer with tkinter GUI and CSV session logging"
   "triageKeywords": ["pomodoro", "timer", "focus"]
 }`;
 
-  try {
-    const message = await callBob([{ role: 'user', content: userContext }], system, 600);
-    const text = message.content[0].type === 'text' ? message.content[0].text : '{}';
-    const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
-    return {
-      hardRequirements: Array.isArray(parsed.hardRequirements) ? parsed.hardRequirements : [],
-      searchQueries: Array.isArray(parsed.searchQueries) && parsed.searchQueries.length > 0
-        ? parsed.searchQueries.slice(0, 3)
-        : [filters.query || filters.language || 'tool'],
-      triageKeywords: Array.isArray(parsed.triageKeywords) ? parsed.triageKeywords : [],
-    };
-  } catch (err) {
-    // Let the caller handle fallback — don't silently return bad queries
-    throw err;
-  }
+  const message = await callBob([{ role: 'user', content: userContext }], system, 600);
+  const text = message.content[0].type === 'text' ? message.content[0].text : '{}';
+  const parsed = JSON.parse(extractJSON(text));
+  return {
+    hardRequirements: Array.isArray(parsed.hardRequirements) ? parsed.hardRequirements : [],
+    searchQueries: Array.isArray(parsed.searchQueries) && parsed.searchQueries.length > 0
+      ? parsed.searchQueries.slice(0, 3)
+      : [filters.query || filters.language || 'tool'],
+    triageKeywords: Array.isArray(parsed.triageKeywords) ? parsed.triageKeywords : [],
+  };
 }
 
 // Steps 4+5: Score candidates with requirement-fit-first rubric
@@ -130,12 +163,12 @@ export async function analyzeRepos(
     : '(infer from user context below)';
 
   const userContext = [
-    filters.query        && `Goal: ${filters.query}`,
+    filters.query          && `Goal: ${filters.query}`,
     filters.projectContext && `Project: ${filters.projectContext}`,
-    filters.language     && `Language: ${filters.language}`,
-    filters.platform     && `Platform: ${filters.platform}`,
-    filters.scale        && `Scale: ${filters.scale}`,
-    filters.purpose      && `Purpose: ${filters.purpose}`,
+    filters.language       && `Language: ${filters.language}`,
+    filters.platform       && `Platform: ${filters.platform}`,
+    filters.scale          && `Scale: ${filters.scale}`,
+    filters.purpose        && `Purpose: ${filters.purpose}`,
     `Experience: ${filters.experience}`,
   ].filter(Boolean).join('\n');
 
@@ -157,7 +190,7 @@ ${requirementsList}
 User context:
 ${userContext}
 
-Score each repository on this rubric:
+Score each repository using this rubric:
 
 requirementFit (0-10) — HIGHEST PRIORITY, weight 0.40
   10 = all hard requirements already implemented
@@ -179,11 +212,11 @@ trustSignals (0-10) — LOW-MEDIUM, weight 0.10
 
 Composite = (requirementFit × 0.40) + (effortToAdapt × 0.30) + (codeReadability × 0.20) + (trustSignals × 0.10)
 
-EXCLUDE any repo where requirementFit < 3 — do not include it in the output array at all.
+EXCLUDE any repo where requirementFit < 3.
 
-For each included repo also write:
-- "explanation": 2-3 sentences on requirement fit and what (if anything) is missing
-- "whyLearnFrom": 1 sentence — is this the best direct match or best base to extend?
+For each included repo write:
+- "explanation": 2-3 sentences on requirement fit and what is missing
+- "whyLearnFrom": 1 sentence — best direct match or best base to extend?
 
 Return ONLY a valid JSON array (no markdown fences):
 [{"index":number,"scores":{"requirementFit":number,"effortToAdapt":number,"codeReadability":number,"trustSignals":number,"composite":number},"explanation":"...","whyLearnFrom":"..."}]`;
@@ -196,7 +229,12 @@ Return ONLY a valid JSON array (no markdown fences):
     );
 
     const responseText = message.content[0].type === 'text' ? message.content[0].text : '[]';
-    const cleaned = responseText.replace(/```json\n?|\n?```/g, '').trim();
+    const firstBracket = responseText.indexOf('[');
+    const lastBracket = responseText.lastIndexOf(']');
+    const cleaned = firstBracket >= 0 && lastBracket > firstBracket
+      ? responseText.slice(firstBracket, lastBracket + 1)
+      : responseText.replace(/```json\n?|\n?```/g, '').trim();
+
     const scored: Array<{
       index: number;
       scores: ScoredRepo['scores'];
