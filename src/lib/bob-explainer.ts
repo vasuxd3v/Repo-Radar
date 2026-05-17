@@ -1,10 +1,12 @@
 import { spawn } from 'child_process';
-import { gunzipSync } from 'zlib';
 import { Octokit } from '@octokit/rest';
 import { callClaude } from './claude';
 import type { BobExplanation } from './types';
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+
+const BOB_BIN        = process.env.BOB_BIN || 'bob';
+const BOB_TIMEOUT_MS = 120_000;
 
 const README_NAMES = new Set(['readme.md', 'readme', 'readme.txt', 'readme.rst']);
 const CODE_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'cs', 'rb', 'swift', 'kt']);
