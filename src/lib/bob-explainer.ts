@@ -1,12 +1,8 @@
-import { spawn } from 'child_process';
+import { gunzipSync } from 'zlib';
 import { Octokit } from '@octokit/rest';
-import { callClaude } from './claude';
 import type { BobExplanation } from './types';
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-
-const BOB_BIN        = process.env.BOB_BIN || 'bob';
-const BOB_TIMEOUT_MS = 120_000;
 
 const README_NAMES = new Set(['readme.md', 'readme', 'readme.txt', 'readme.rst']);
 const CODE_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'cs', 'rb', 'swift', 'kt']);
@@ -53,45 +49,36 @@ async function fetchFileContent(owner: string, repo: string, path: string): Prom
   }
 }
 
-// IBM Bob Shell CLI — the documented way to call Bob programmatically
-// Uses BOBSHELL_API_KEY env var + `bob --auth-method api-key`
-// Supports stdin piping: `cat prompt.txt | bob --auth-method api-key`
-function callBobShell(prompt: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const apiKey = process.env.BOBSHELL_API_KEY || process.env.IBM_BOB_API_KEY;
-    const env = { ...process.env, BOBSHELL_API_KEY: apiKey ?? '' };
+// IBM Bob REST API call — no CLI needed, works on any hosting platform.
+async function callBobAPI(system: string, userMessage: string): Promise<string> {
+  const endpoint = (process.env.IBM_BOB_ENDPOINT || '').replace(/\/$/, '');
+  const apiKey   = process.env.IBM_BOB_API_KEY || '';
+  const model    = process.env.IBM_BOB_MODEL   || 'bob-v1';
 
-    const child = spawn(BOB_BIN, ['--auth-method', 'api-key', '--accept-license'], { env });
-
-    let stdout = '';
-    let stderr = '';
-
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error('Bob Shell timed out after 120s'));
-    }, BOB_TIMEOUT_MS);
-
-    child.stdout.on('data', (d) => { stdout += d.toString(); });
-    child.stderr.on('data', (d) => { stderr += d.toString(); });
-
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0 && stdout.trim()) resolve(stdout.trim());
-      else reject(new Error(`Bob Shell exited ${code}: ${stderr.trim() || 'no output'}`));
-    });
-
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(new Error(`Cannot start Bob Shell: ${err.message}`));
-    });
-
-    child.stdin.write(prompt);
-    child.stdin.end();
+  const res = await fetch(`${endpoint}/messages`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+    body:    JSON.stringify({
+      model,
+      max_tokens: 2048,
+      system,
+      messages: [{ role: 'user', content: userMessage }],
+    }),
   });
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  let raw: string;
+  try   { raw = gunzipSync(buf).toString('utf-8'); }
+  catch { raw = buf.toString('utf-8'); }
+
+  if (!res.ok) throw new Error(`Bob API ${res.status}: ${raw}`);
+
+  const data = JSON.parse(raw);
+  if (Array.isArray(data.content)) return data.content[0]?.text ?? raw;
+  return data.completion ?? data.text ?? data.output ?? raw;
 }
 
-// Extract the first well-formed JSON object from Bob Shell output.
-// Bob's output includes reasoning steps, ANSI color codes, and prose around the JSON.
+// Extract the first well-formed JSON object from Bob's output.
 function extractJSON(raw: string): string {
   // Strip ANSI/VT escape sequences (terminal colors Bob Shell emits)
   const clean = raw
@@ -133,21 +120,7 @@ function extractJSON(raw: string): string {
 }
 
 async function getAIResponse(system: string, userMessage: string): Promise<string> {
-  const fullPrompt = `${system}\n\n${userMessage}`;
-
-  // Primary: IBM Bob Shell CLI (the documented non-interactive API)
-  try {
-    const text = await callBobShell(fullPrompt);
-    if (text) {
-      console.log('[RepoRadar] Used IBM Bob Shell for explanation');
-      return text;
-    }
-  } catch (err) {
-    console.warn('[RepoRadar] Primary engine unavailable, using backup:', (err as Error).message);
-  }
-
-  // Backup engine
-  return callClaude(fullPrompt);
+  return callBobAPI(system, userMessage);
 }
 
 export async function explainRepository(
