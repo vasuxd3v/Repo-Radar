@@ -1,3 +1,4 @@
+import { spawn } from 'child_process';
 import { gunzipSync } from 'zlib';
 import { Octokit } from '@octokit/rest';
 import { callClaude } from './claude';
