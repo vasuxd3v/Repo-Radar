@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { searchRepos } from '@/lib/github';
 import { extractSearchPlan as extractPlanBob, analyzeRepos } from '@/lib/bob';
+import { extractSearchPlan as extractPlanClaude } from '@/lib/claude';
 import type { SearchFilters } from '@/lib/types';
 import type { SearchPlan } from '@/lib/bob';
 
@@ -51,8 +52,13 @@ export async function POST(req: NextRequest) {
     // ── Step 1+2: Extract requirements and search queries via AI ──
     step('Translating your request into requirements and search queries...');
     let plan: SearchPlan;
-    plan = await extractPlanBob(filters);
-    step('Search plan ready.');
+    try {
+      plan = await extractPlanBob(filters);
+      step('Search plan ready.');
+    } catch {
+      step('Retrying search plan with backup engine...');
+      plan = await extractPlanClaude(filters);
+    }
     step(`Requirements: ${plan.hardRequirements.join(' · ') || 'inferred from context'}`);
     step(`Search angles: ${plan.searchQueries.map((q) => `"${q}"`).join(', ')}`);
 

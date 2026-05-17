@@ -1,4 +1,4 @@
-import { gunzipSync } from 'zlib';
+import { spawn } from 'child_process';
 import { fetchReadme, RepoResult, SearchParams } from './github';
 import type { ScoredRepo, SearchFilters } from './types';
 
@@ -8,37 +8,39 @@ export interface SearchPlan {
   triageKeywords:   string[];
 }
 
-// IBM Bob REST API — works on Render, Vercel, Railway, anywhere.
+const BOB_BIN        = process.env.BOB_BIN || 'bob';
+const BOB_TIMEOUT_MS = 150_000;
+
+function callBobShell(prompt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const apiKey = process.env.BOBSHELL_API_KEY || process.env.IBM_BOB_API_KEY;
+    const env    = { ...process.env, BOBSHELL_API_KEY: apiKey ?? '' };
+    const child  = spawn(BOB_BIN, ['--auth-method', 'api-key', '--accept-license'], { env });
+
+    let stdout = '', stderr = '';
+    const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('Bob timed out')); }, BOB_TIMEOUT_MS);
+
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0 && stdout.trim()) resolve(stdout.trim());
+      else reject(new Error(`Bob exited ${code}: ${stderr.trim() || 'no output'}`));
+    });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.stdin.write(prompt);
+    child.stdin.end();
+  });
+}
+
 export async function callBob(
   messages: Array<{ role: string; content: string }>,
   system:   string,
-  maxTokens = 512
+  _maxTokens = 512
 ) {
-  const endpoint = (process.env.IBM_BOB_ENDPOINT || '').replace(/\/$/, '');
-  const apiKey   = process.env.IBM_BOB_API_KEY || '';
-  const model    = process.env.IBM_BOB_MODEL   || 'bob-v1';
-
-  if (!endpoint || !apiKey) throw new Error('IBM_BOB_ENDPOINT and IBM_BOB_API_KEY env vars are required');
-
-  const res = await fetch(`${endpoint}/messages`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-    body:    JSON.stringify({ model, max_tokens: maxTokens, system, messages }),
-  });
-
-  const buf = Buffer.from(await res.arrayBuffer());
-  let raw: string;
-  try   { raw = gunzipSync(buf).toString('utf-8'); }
-  catch { raw = buf.toString('utf-8'); }
-
-  if (!res.ok) throw new Error(`Bob API ${res.status}: ${raw}`);
-
-  const data = JSON.parse(raw);
-  // Already in Anthropic format: { content: [{ type:'text', text:'...' }] }
-  if (Array.isArray(data.content)) return data;
-  // Flat text fallback
-  const text = data.completion ?? data.text ?? data.output ?? raw;
-  return { content: [{ type: 'text' as const, text: String(text) }] };
+  const fullPrompt = `${system}\n\n${messages.map((m) => m.content).join('\n\n')}`;
+  const text = await callBobShell(fullPrompt);
+  return { content: [{ type: 'text' as const, text }] };
 }
 
 function extractJSON(raw: string): string {
